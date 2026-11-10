@@ -1,10 +1,11 @@
 -- omarchy-dtp-windows: how windows look.
---   * the focused window's border at 75% opacity
+--   * the focused window's border at 50% opacity
 --   * floating windows' title bars as tall as the OS bar, with smaller text
--- Loaded last from hyprland.lua, so it runs after the theme and after Omarchy
--- sets up the title bars.
+--   * glass title bars, see-through and blurred while the OS bar is glassy
+-- Loaded from hyprland.lua before Omarchy sets up the title bars, so it is in
+-- place whenever they are set up, at load or later.
 
-local ACTIVE_BORDER_OPACITY = 0.75
+local ACTIVE_BORDER_OPACITY = 0.5
 
 local home = os.getenv("HOME")
 local state_home = os.getenv("XDG_STATE_HOME") or (home .. "/.local/state")
@@ -40,7 +41,7 @@ local function toml_number(text, section, key)
   return nil
 end
 
--- The focused window's border, in the theme's color at 75%.
+-- The focused window's border, in the theme's color at half strength.
 local theme_hyprland = read(state_home .. "/omarchy/current/theme/hyprland.lua") or ""
 local hex = theme_hyprland:match('active_border_color%s*=%s*"#(%x%x%x%x%x%x)"')
 if hex then
@@ -60,9 +61,36 @@ local font = toml_number(user_shell, "font", "base-size") or toml_number(theme_s
 local bar = toml_number(user_shell, "bar", "size-horizontal") or toml_number(theme_shell, "bar", "size-horizontal") or 26
 local height = math.floor(bar * font / 12 + 0.5)
 
-hl._dtp_windows = { bar_height = height, bar_text_size = math.floor(font + 0.5) }
+-- The title bars' glass: while the OS bar is glassy they take its look, the
+-- theme's glass opacity ([dtp] glass-alpha, 0.35 without it) and the blur behind.
+local glassy_flag = io.open(state_home .. "/omarchy/toggles/hypr/bar-glassy.lua", "r")
+local glassy = glassy_flag ~= nil
+if glassy_flag then
+  glassy_flag:close()
+end
+local alpha = toml_number(theme_shell, "dtp", "glass-alpha") or 0.35
+
+hl._dtp_windows = {
+  bar_height = height,
+  bar_text_size = math.floor(font + 0.5),
+  glassy = glassy,
+  alpha = alpha,
+}
 -- So omarchy-dtp-floating-titlebar-limits keeps the right amount on screen.
 o.titlebar_height = height
+
+-- A color at the glass opacity. Takes rgb(rrggbb) and rgba(rrggbbaa).
+local function glass(color)
+  local state = hl._dtp_windows
+  if not state.glassy or type(color) ~= "string" then
+    return color
+  end
+  local hex = color:match("^rgb%((%x%x%x%x%x%x)%)$") or color:match("^rgba%((%x%x%x%x%x%x)%x%x%)$")
+  if not hex then
+    return color
+  end
+  return string.format("rgba(%s%02x)", hex, math.floor(state.alpha * 255 + 0.5))
+end
 
 -- Omarchy sets the title bar options when a workspace starts floating, which can
 -- be after this file has run, and its numbers would win. So the options pass
@@ -73,14 +101,39 @@ if not hl._dtp_windows_wrapped then
   hl.config = function(options, ...)
     local bars = type(options) == "table" and type(options.plugin) == "table" and options.plugin.hyprbars
     if type(bars) == "table" then
-      bars.bar_height = hl._dtp_windows.bar_height
-      bars.bar_text_size = hl._dtp_windows.bar_text_size
+      local state = hl._dtp_windows
+      bars.bar_height = state.bar_height
+      bars.bar_text_size = state.bar_text_size
+      bars.bar_blur = state.glassy
+      bars.bar_color = glass(bars.bar_color)
+      bars.bar_color_inactive = glass(bars.bar_color_inactive)
+      bars.inactive_button_color = glass(bars.inactive_button_color)
     end
     return config(options, ...)
   end
-end
 
--- The title bars may already be set up by now.
-if hl.plugin and hl.plugin.hyprbars then
-  hl.config({ plugin = { hyprbars = {} } })
+  -- The buttons paint a background of their own, which would show as solid
+  -- squares on a glass bar. They are added after the plugin loads, so they are
+  -- caught as it does.
+  local function patch_buttons()
+    local bars_api = hl.plugin and hl.plugin.hyprbars
+    if bars_api and bars_api.add_button and not bars_api._dtp_windows_patched then
+      local add_button = bars_api.add_button
+      bars_api.add_button = function(button, ...)
+        if type(button) == "table" then
+          button.bg_color = glass(button.bg_color)
+        end
+        return add_button(button, ...)
+      end
+      bars_api._dtp_windows_patched = true
+    end
+  end
+
+  local load = hl.plugin.load
+  hl.plugin.load = function(...)
+    local results = table.pack(load(...))
+    patch_buttons()
+    return table.unpack(results, 1, results.n)
+  end
+  patch_buttons()
 end
