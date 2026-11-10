@@ -25,6 +25,14 @@ fi
 [[ -f $HYPR/hyprland.lua ]] || fail "$HYPR/hyprland.lua must already exist"
 
 changed=0
+# Omarchy's title bar plugin with the blur fixed, for glass title bars. Without
+# it the title bars are tinted but not frosted, so a failed build is not fatal.
+built="$("$ROOT/titlebars/build.sh")" || echo "install: the title bar plugin did not build; glass title bars will not blur" >&2
+if [[ -n ${built:-} ]]; then
+  echo "$built"
+  [[ $built == Built* ]] && changed=1
+fi
+
 if ! cmp -s "$ROOT/hypr/dtp-windows.lua" "$HYPR/dtp-windows.lua"; then
   cp "$ROOT/hypr/dtp-windows.lua" "$HYPR/dtp-windows.lua"
   echo "Updated $HYPR/dtp-windows.lua"

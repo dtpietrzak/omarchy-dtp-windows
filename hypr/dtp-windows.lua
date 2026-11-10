@@ -103,9 +103,10 @@ hl._dtp_windows = {
 -- So omarchy-dtp-floating-titlebar-limits keeps the right amount on screen.
 o.titlebar_height = height
 
--- A title bar color as glass: the OS bar's color at the glass opacity. Takes
--- rgb(rrggbb) and rgba(rrggbbaa), and leaves anything else alone.
-local function glass(color)
+-- A title bar color as glass: the OS bar's color at the glass opacity, or at
+-- the opacity given. Takes rgb(rrggbb) and rgba(rrggbbaa), and leaves anything
+-- else alone.
+local function glass(color, alpha)
   local state = hl._dtp_windows
   if not state.glassy or type(color) ~= "string" then
     return color
@@ -114,7 +115,14 @@ local function glass(color)
   if not hex then
     return color
   end
-  return string.format("rgba(%s%02x)", state.color or hex, math.floor(state.alpha * 255 + 0.5))
+  return string.format("rgba(%s%02x)", state.color or hex, math.floor((alpha or state.alpha) * 255 + 0.5))
+end
+
+-- The buttons sit on the bar, so a tint of their own would stack on the bar's
+-- and show as darker squares. On glass they are clear: only the symbol and the
+-- hover highlight are drawn.
+local function clear(color)
+  return glass(color, 0)
 end
 
 -- Omarchy sets the title bar options when a workspace starts floating, which can
@@ -132,21 +140,21 @@ if not hl._dtp_windows_wrapped then
       bars.bar_blur = state.glassy
       bars.bar_color = glass(bars.bar_color)
       bars.bar_color_inactive = glass(bars.bar_color_inactive)
-      bars.inactive_button_color = glass(bars.inactive_button_color)
+      bars.inactive_button_color = clear(bars.inactive_button_color)
     end
     return config(options, ...)
   end
 
-  -- The buttons paint a background of their own, which would show as solid
-  -- squares on a glass bar. They are added after the plugin loads, so they are
-  -- caught as it does.
+  -- The buttons paint a background of their own, which would show as squares
+  -- on a glass bar. They are added after the plugin loads, so they are caught
+  -- as it does.
   local function patch_buttons()
     local bars_api = hl.plugin and hl.plugin.hyprbars
     if bars_api and bars_api.add_button and not bars_api._dtp_windows_patched then
       local add_button = bars_api.add_button
       bars_api.add_button = function(button, ...)
         if type(button) == "table" then
-          button.bg_color = glass(button.bg_color)
+          button.bg_color = clear(button.bg_color)
         end
         return add_button(button, ...)
       end
@@ -154,9 +162,32 @@ if not hl._dtp_windows_wrapped then
     end
   end
 
+  -- Omarchy's title bar plugin draws its bar without the blur it asks for.
+  -- titlebars/build.sh builds it with the fix into ~/.local/lib, stamped with
+  -- the Hyprland it was built for; it stands in for Omarchy's copy only while
+  -- that is still the Hyprland installed, since a plugin built for another one
+  -- can take Hyprland down.
+  local OMARCHY_TITLEBARS = "/usr/lib/omarchy-hyprland-titlebars/titlebars.so"
+  local patched_dir = home .. "/.local/lib/omarchy-dtp-windows"
+  local function titlebars_path(path)
+    if path ~= OMARCHY_TITLEBARS then
+      return path
+    end
+    local built_for = (read(patched_dir .. "/hyprland-commit") or ""):match("%x+")
+    local installed = (read("/usr/include/hyprland/src/version.h") or ""):match('GIT_COMMIT_HASH%s+"(%x+)"')
+    local plugin = io.open(patched_dir .. "/titlebars.so", "r")
+    if plugin then
+      plugin:close()
+    end
+    if plugin and built_for and built_for == installed then
+      return patched_dir .. "/titlebars.so"
+    end
+    return path
+  end
+
   local load = hl.plugin.load
-  hl.plugin.load = function(...)
-    local results = table.pack(load(...))
+  hl.plugin.load = function(path, ...)
+    local results = table.pack(load(titlebars_path(path), ...))
     patch_buttons()
     return table.unpack(results, 1, results.n)
   end
