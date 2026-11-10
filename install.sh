@@ -30,7 +30,7 @@ changed=0
 built="$("$ROOT/titlebars/build.sh")" || echo "install: the title bar plugin did not build; glass title bars will not blur" >&2
 if [[ -n ${built:-} ]]; then
   echo "$built"
-  [[ $built == Built* ]] && changed=1
+  [[ $built == Built* || $built == Removed* ]] && changed=1
 fi
 
 if ! cmp -s "$ROOT/hypr/dtp-windows.lua" "$HYPR/dtp-windows.lua"; then
