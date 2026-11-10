@@ -41,6 +41,27 @@ local function toml_number(text, section, key)
   return nil
 end
 
+-- One quoted value from a shell.toml section.
+local function toml_string(text, section, key)
+  if not text then
+    return nil
+  end
+  local pattern = "^%s*" .. key:gsub("%-", "%%-") .. '%s*=%s*"([^"]*)"'
+  local current
+  for line in text:gmatch("[^\r\n]+") do
+    local name = line:match("^%s*%[([%w_-]+)%]")
+    if name then
+      current = name
+    elseif current == section then
+      local value = line:match(pattern)
+      if value then
+        return value
+      end
+    end
+  end
+  return nil
+end
+
 -- The focused window's border, in the theme's color at half strength.
 local theme_hyprland = read(state_home .. "/omarchy/current/theme/hyprland.lua") or ""
 local hex = theme_hyprland:match('active_border_color%s*=%s*"#(%x%x%x%x%x%x)"')
@@ -69,17 +90,21 @@ if glassy_flag then
   glassy_flag:close()
 end
 local alpha = toml_number(theme_shell, "dtp", "glass-alpha") or 0.35
+-- The glass is the OS bar's color, not the raised color the title bar has when solid.
+local bar_color = (toml_string(user_shell, "bar", "background") or toml_string(theme_shell, "bar", "background") or ""):match("^#(%x%x%x%x%x%x)$")
 
 hl._dtp_windows = {
   bar_height = height,
   bar_text_size = math.floor(font + 0.5),
   glassy = glassy,
   alpha = alpha,
+  color = bar_color,
 }
 -- So omarchy-dtp-floating-titlebar-limits keeps the right amount on screen.
 o.titlebar_height = height
 
--- A color at the glass opacity. Takes rgb(rrggbb) and rgba(rrggbbaa).
+-- A title bar color as glass: the OS bar's color at the glass opacity. Takes
+-- rgb(rrggbb) and rgba(rrggbbaa), and leaves anything else alone.
 local function glass(color)
   local state = hl._dtp_windows
   if not state.glassy or type(color) ~= "string" then
@@ -89,7 +114,7 @@ local function glass(color)
   if not hex then
     return color
   end
-  return string.format("rgba(%s%02x)", hex, math.floor(state.alpha * 255 + 0.5))
+  return string.format("rgba(%s%02x)", state.color or hex, math.floor(state.alpha * 255 + 0.5))
 end
 
 -- Omarchy sets the title bar options when a workspace starts floating, which can
