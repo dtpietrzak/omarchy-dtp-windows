@@ -132,8 +132,9 @@ end
 -- window in Hyprland's maximized state, a kind of fullscreen.
 --
 -- A filled window carries the dtp-filled tag, which the patched title bar
--- plugin reads to show ❐ on the button instead of □. Moving or resizing it
--- by hand ends the fill: the tag goes and the next double-click fills again.
+-- plugin reads to show ❐ on the button instead of □. It stays filled while it
+-- keeps the filled size, wherever it is dragged; resizing it by hand ends the
+-- fill, and the tag goes.
 local FILLED_TAG = "dtp-filled"
 hl._dtp_windows_filled = hl._dtp_windows_filled or {}
 
@@ -171,13 +172,21 @@ local function fill_rect(window)
   }
 end
 
+-- Filled is a matter of size: the size it was filled to, or after a reload,
+-- when that is forgotten, its screen's fill size.
 local function at_fill(window)
   if not window.monitor or not window.floating or (window.fullscreen or 0) ~= 0 then
     return false
   end
-  local fill = fill_rect(window)
-  local at, size = window.at, window.size
-  return close_to(at.x, fill.x) and close_to(at.y, fill.y) and close_to(size.x, fill.w) and close_to(size.y, fill.h)
+  local saved = hl._dtp_windows_filled[window.address]
+  local w, h
+  if saved then
+    w, h = saved.fill_w, saved.fill_h
+  else
+    local fill = fill_rect(window)
+    w, h = fill.w, fill.h
+  end
+  return close_to(window.size.x, w) and close_to(window.size.y, h)
 end
 
 local function tagged(window)
@@ -228,7 +237,7 @@ function hl._dtp_windows_fill(address)
     hl._dtp_windows_filled[address] = nil
     set_tag(window, false)
   else
-    hl._dtp_windows_filled[address] = { x = at.x, y = at.y, w = size.x, h = size.y }
+    hl._dtp_windows_filled[address] = { x = at.x, y = at.y, w = size.x, h = size.y, fill_w = fill.w, fill_h = fill.h }
     target = fill
     set_tag(window, true)
   end
@@ -251,7 +260,7 @@ function hl._dtp_windows_unfilled_size(window)
   return tagged(window) and false or nil
 end
 
--- A filled window moved or resized by hand, or closed, is no longer filled.
+-- A filled window resized by hand, or closed, is no longer filled.
 -- There is no move or resize event, so this looks a few times a second.
 if not hl._dtp_windows_fill_watch then
   hl._dtp_windows_fill_watch = true
