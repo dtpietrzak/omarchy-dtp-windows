@@ -6,6 +6,8 @@
 -- place whenever they are set up, at load or later.
 
 local ACTIVE_BORDER_OPACITY = 0.5
+-- The space left around a window that fills the screen, in place of the gaps.
+local FILL_GAP = 0
 
 local home = os.getenv("HOME")
 local state_home = os.getenv("XDG_STATE_HOME") or (home .. "/.local/state")
@@ -127,7 +129,7 @@ end
 
 -- Double-clicking a title bar (or its □ button) fills the screen by plain move
 -- and resize: the window stays an ordinary floating window, with its title bar,
--- border and rounding, inside the gaps and clear of the OS bar. Doing it again
+-- border and rounding, FILL_GAP from the edges and clear of the OS bar. Doing it again
 -- puts the window back where it was. Omarchy's own action instead puts the
 -- window in Hyprland's maximized state, a kind of fullscreen.
 --
@@ -151,11 +153,7 @@ local function fill_rect(window)
     width, height = height, width
   end
   local reserved = type(monitor.reserved) == "table" and monitor.reserved or {}
-  local gaps = hl.get_config("general.gaps_out")
-  if type(gaps) ~= "table" then
-    local gap = tonumber(gaps) or 0
-    gaps = { top = gap, right = gap, bottom = gap, left = gap }
-  end
+  local gaps = { top = FILL_GAP, right = FILL_GAP, bottom = FILL_GAP, left = FILL_GAP }
   local border = tonumber(hl.get_config("general.border_size")) or 0
   -- The title bar hangs above the client, so the client starts below it.
   local bar = o.titlebar_height or 30
