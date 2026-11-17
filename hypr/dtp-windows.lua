@@ -125,6 +125,83 @@ local function clear(color)
   return glass(color, 0)
 end
 
+-- Double-clicking a title bar (or its □ button) fills the screen by plain move
+-- and resize: the window stays an ordinary floating window, with its title bar,
+-- border and rounding, inside the gaps and clear of the OS bar. Doing it again
+-- puts the window back where it was. Omarchy's own action instead puts the
+-- window in Hyprland's maximized state, a kind of fullscreen.
+hl._dtp_windows_filled = hl._dtp_windows_filled or {}
+
+local function close_to(a, b)
+  return math.abs(a - b) <= 2
+end
+
+function hl._dtp_windows_fill(address)
+  local window
+  for _, candidate in ipairs(hl.get_windows()) do
+    if candidate.address == address then
+      window = candidate
+      break
+    end
+  end
+  if not window or not window.monitor then
+    return
+  end
+  if (window.fullscreen or 0) ~= 0 then
+    hl.dispatch(hl.dsp.window.fullscreen({ mode = "maximized", action = "unset", window = window }))
+    return
+  end
+  if not window.floating then
+    return
+  end
+
+  local monitor = window.monitor
+  local scale = (monitor.scale and monitor.scale ~= 0) and monitor.scale or 1
+  local width, height = monitor.width / scale, monitor.height / scale
+  if (monitor.transform or 0) % 2 == 1 then
+    width, height = height, width
+  end
+  local reserved = type(monitor.reserved) == "table" and monitor.reserved or {}
+  local gaps = hl.get_config("general.gaps_out")
+  if type(gaps) ~= "table" then
+    local gap = tonumber(gaps) or 0
+    gaps = { top = gap, right = gap, bottom = gap, left = gap }
+  end
+  local border = tonumber(hl.get_config("general.border_size")) or 0
+  -- The title bar hangs above the client, so the client starts below it.
+  local bar = o.titlebar_height or 30
+
+  local left = monitor.x + (reserved.left or 0) + (gaps.left or 0) + border
+  local top = monitor.y + (reserved.top or 0) + (gaps.top or 0) + border + bar
+  local right = monitor.x + width - (reserved.right or 0) - (gaps.right or 0) - border
+  local bottom = monitor.y + height - (reserved.bottom or 0) - (gaps.bottom or 0) - border
+  local fill = {
+    x = math.floor(left + 0.5),
+    y = math.floor(top + 0.5),
+    w = math.floor(right - left + 0.5),
+    h = math.floor(bottom - top + 0.5),
+  }
+
+  local at, size = window.at, window.size
+  local filled = close_to(at.x, fill.x) and close_to(at.y, fill.y) and close_to(size.x, fill.w) and close_to(size.y, fill.h)
+  local saved = hl._dtp_windows_filled[address]
+  local target
+  if filled and saved then
+    target = saved
+    hl._dtp_windows_filled[address] = nil
+  elseif filled then
+    return
+  else
+    hl._dtp_windows_filled[address] = { x = at.x, y = at.y, w = size.x, h = size.y }
+    target = fill
+  end
+
+  hl.dispatch(hl.dsp.window.resize({ x = target.w, y = target.h, relative = false, window = window }))
+  hl.dispatch(hl.dsp.window.move({ x = target.x, y = target.y, relative = false, window = window }))
+end
+
+local FILL_ACTION = [[hyprctl eval 'hl._dtp_windows_fill("%WINDOW%")']]
+
 -- Omarchy sets the title bar options when a workspace starts floating, which can
 -- be after this file has run, and its numbers would win. So the options pass
 -- through here on their way in.
@@ -141,6 +218,7 @@ if not hl._dtp_windows_wrapped then
       bars.bar_color = glass(bars.bar_color)
       bars.bar_color_inactive = glass(bars.bar_color_inactive)
       bars.inactive_button_color = clear(bars.inactive_button_color)
+      bars.on_double_click = FILL_ACTION
     end
     return config(options, ...)
   end
@@ -155,6 +233,9 @@ if not hl._dtp_windows_wrapped then
       bars_api.add_button = function(button, ...)
         if type(button) == "table" then
           button.bg_color = clear(button.bg_color)
+          if type(button.action) == "string" and button.action:find('"maximized"', 1, true) then
+            button.action = FILL_ACTION
+          end
         end
         return add_button(button, ...)
       end
