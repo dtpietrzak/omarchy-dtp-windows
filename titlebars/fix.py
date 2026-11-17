@@ -13,9 +13,10 @@ It also gives add_button an optional alt_icon and alt_tag: a window with that
 tag shows alt_icon on the button instead. The maximize button uses it to show
 when a window fills the screen.
 
-Matched by pattern rather than as a diff, so it fits the 0.56 and 0.57 builds
-alike. Exits 0 when it changed the source, 3 when the source already has every
-fix (nothing to build), and 1 when the source is not what it expects.
+And it takes over resizing from a floating window's border: a side moves only
+that side and a corner moves both (Hyprland grabs a corner wherever you press),
+and the edge above the bar and the strips beside it get the resize cursor and
+resize too (Hyprland measures its border from the window's content).
 """
 
 import re
@@ -90,6 +91,206 @@ def alt_icon(root: Path) -> bool:
     return True
 
 
+# Resizing from a floating window's border, one edge or one corner at a time.
+#
+# Hyprland resizes from the border by grabbing the corner of the quarter the
+# press lands in, so a press on the left side moves the top or bottom as well
+# when the pointer drifts. And it measures its border from the window's content,
+# so on a titled window nothing above the bar or beside it shows the resize
+# cursor or resizes. This takes over presses on a floating window's border: a
+# side moves only that side and a corner moves both, matching the cursor shape,
+# which now also shows above the bar and beside it. The cursor goes in the lowest
+# override group; where Hyprland shows its own, the shapes agree.
+EDGE_FUNCTIONS = r"""
+// The one bar showing the edge cursor; others leave it alone.
+static COmarchyFloatingHyprBar *g_pEdgeCursorOwner = nullptr;
+
+// The edge a press at this point resizes: one side, or a corner's two sides.
+// CORNER_NONE off the window's resize border. Below the bar it draws the same
+// zones as Hyprland's resize cursor; above and beside the bar it adds its own.
+Layout::eRectCorner COmarchyFloatingHyprBar::edgeAt(PHLWINDOW window, const Vector2D &mouse) {
+  using namespace Layout;
+  static const auto RESIZEONBORDER = CConfigValue<Config::INTEGER>("general:resize_on_border");
+  static const auto EXTENDGRAB = CConfigValue<Config::INTEGER>("general:extend_border_grab_area");
+
+  if (!*RESIZEONBORDER || !window || !window->m_isFloating || Fullscreen::controller()->isFullscreen(window) || window->hasPopupAt(mouse))
+    return CORNER_NONE;
+
+  const double BORDER = window->getRealBorderSize();
+  const double GRAB = BORDER + *EXTENDGRAB;
+  // Hyprland's corner reach: the rounding and the border, plus 10 pixels.
+  const double CORNER = window->rounding() + BORDER + 10;
+  const auto BAR = assignedBoxGlobal();
+  const auto BOX = window->getWindowMainSurfaceBox();
+
+  // The band above the bar, and the strips beside it, which sit within the
+  // corner reach of the window's top corners.
+  if (!m_hidden && mouse.x >= BAR.x - GRAB && mouse.x < BAR.x + BAR.w + GRAB && mouse.y >= BAR.y - GRAB && mouse.y < BAR.y + BAR.h) {
+    if (mouse.y < BAR.y) {
+      if (mouse.x < BAR.x + CORNER)
+        return CORNER_TOPLEFT;
+      if (mouse.x >= BAR.x + BAR.w - CORNER)
+        return CORNER_TOPRIGHT;
+      return CORNER_TOP;
+    }
+    if (mouse.x < BAR.x)
+      return CORNER_TOPLEFT;
+    if (mouse.x >= BAR.x + BAR.w)
+      return CORNER_TOPRIGHT;
+    return CORNER_NONE;
+  }
+
+  if (!BOX.copy().expand(GRAB).containsPoint(mouse) || (!m_hidden && BAR.containsPoint(mouse)))
+    return CORNER_NONE;
+
+  // Inside the window only its rounded-off corners resize.
+  if (BOX.containsPoint(mouse)) {
+    if (!window->isInCurvedCorner(mouse.x, mouse.y))
+      return CORNER_NONE;
+    return sc<eRectCorner>((mouse.y < BOX.y + CORNER ? CORNER_TOP : CORNER_BOTTOM) | (mouse.x < BOX.x + CORNER ? CORNER_LEFT : CORNER_RIGHT));
+  }
+
+  const bool LEFT = mouse.x < BOX.x + CORNER;
+  const bool RIGHT = mouse.x > BOX.x + BOX.w - CORNER;
+  if (mouse.y < BOX.y + CORNER)
+    return LEFT ? CORNER_TOPLEFT : RIGHT ? CORNER_TOPRIGHT : CORNER_TOP;
+  if (mouse.y > BOX.y + BOX.h - CORNER)
+    return LEFT ? CORNER_BOTTOMLEFT : RIGHT ? CORNER_BOTTOMRIGHT : CORNER_BOTTOM;
+  return LEFT ? CORNER_LEFT : RIGHT ? CORNER_RIGHT : CORNER_NONE;
+}
+
+// Hyprland's names for its resize cursors.
+static const char *edgeCursorName(Layout::eRectCorner edge) {
+  using namespace Layout;
+  switch (edge) {
+    case CORNER_TOP: return "top_side";
+    case CORNER_BOTTOM: return "bottom_side";
+    case CORNER_LEFT: return "left_side";
+    case CORNER_RIGHT: return "right_side";
+    case CORNER_TOPLEFT: return "top_left_corner";
+    case CORNER_TOPRIGHT: return "top_right_corner";
+    case CORNER_BOTTOMLEFT: return "bottom_left_corner";
+    case CORNER_BOTTOMRIGHT: return "bottom_right_corner";
+    default: return nullptr;
+  }
+}
+
+// Whether this window is the one under the pointer, with no panel over it.
+bool COmarchyFloatingHyprBar::windowIsUnderPointer(PHLWINDOW window, const Vector2D &mouse) {
+  const auto PMONITOR = State::monitorState()->query().vec(mouse).run();
+  if (!PMONITOR || (g_pSeatManager->m_seatGrab && !g_pSeatManager->m_seatGrab->accepts(window->wlSurface()->resource())))
+    return false;
+
+  Desktop::CViewHitTester hitTester{*Desktop::viewState()};
+  if (hitTester.windowAt(mouse, Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING) != window)
+    return false;
+
+  PHLLS foundSurface = nullptr;
+  Vector2D surfaceCoords;
+  hitTester.layerSurfaceAt(mouse, &PMONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY], &surfaceCoords, &foundSurface);
+  if (!foundSurface)
+    hitTester.layerSurfaceAt(mouse, &PMONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP], &surfaceCoords, &foundSurface);
+  return !foundSurface;
+}
+
+// Shows the resize cursor while the pointer is on this window's border, and
+// takes it away when the pointer leaves.
+void COmarchyFloatingHyprBar::updateEdgeCursor() {
+  static const auto HOVERICON = CConfigValue<Config::INTEGER>("general:hover_icon_on_border");
+
+  const char *shape = nullptr;
+  const auto PWINDOW = m_pWindow.lock();
+  if (*HOVERICON && PWINDOW && !m_hidden && g_pOmarchyFloatingGlobalState->config.enabled->value() && g_pInputManager->m_currentlyHeldButtons.empty()) {
+    const auto MOUSE = g_pInputManager->getMouseCoordsInternal();
+    shape = edgeCursorName(edgeAt(PWINDOW, MOUSE));
+    if (shape && !windowIsUnderPointer(PWINDOW, MOUSE))
+      shape = nullptr;
+  }
+
+  if (shape) {
+    g_pEdgeCursorOwner = this;
+    Pointer::Cursor::overrideController->setOverride(shape, Pointer::Cursor::CURSOR_OVERRIDE_UNKNOWN);
+  } else if (g_pEdgeCursorOwner == this) {
+    g_pEdgeCursorOwner = nullptr;
+    Pointer::Cursor::overrideController->unsetOverride(Pointer::Cursor::CURSOR_OVERRIDE_UNKNOWN);
+  }
+}
+"""
+
+# Replaces the plugin's own top-edge press handler, which left the corner to
+# Hyprland's quarter rule and covered only the band above the bar.
+EDGE_PRESS = r"""bool COmarchyFloatingHyprBar::startTopEdgeResize(Event::SCallbackInfo &info, PHLWINDOW window, const Vector2D &coords) {
+  const auto MOUSE = g_pInputManager->getMouseCoordsInternal();
+  const auto EDGE = edgeAt(window, MOUSE);
+  if (EDGE == Layout::CORNER_NONE || g_layoutManager->dragController()->target() || !windowIsUnderPointer(window, MOUSE))
+    return false;
+
+  if (Desktop::focusState()->window() != window)
+    Desktop::focusState()->fullWindowFocus(window, Desktop::FOCUS_REASON_CLICK);
+  Desktop::windowState()->raise(window);
+
+  // A side moves only that side; a corner moves both of its sides.
+  g_layoutManager->beginDragTarget(window->layoutTarget(), MBIND_RESIZE, EDGE);
+
+  // The press never reaches Hyprland, so neither does the release: the up
+  // handler ends the resize the way it ends a titlebar drag.
+  info.cancelled = true;
+  m_bCancelledDown = true;
+  m_bDraggingThis = true;
+  m_bDragPending = false;
+  return true;
+}
+"""
+
+
+def edge_cursor(root: Path) -> bool:
+    bar_h = root / "barDeco.hpp"
+    bar_cpp = root / "barDeco.cpp"
+    h, b = bar_h.read_text(), bar_cpp.read_text()
+    if "edgeAt" in b:
+        return False
+
+    h = replace_once(h, "  void onMouseMove(Vector2D coords);\n",
+                     "  void onMouseMove(Vector2D coords);\n"
+                     "  Layout::eRectCorner edgeAt(PHLWINDOW window, const Vector2D &mouse);\n"
+                     "  bool windowIsUnderPointer(PHLWINDOW window, const Vector2D &mouse);\n"
+                     "  void updateEdgeCursor();\n",
+                     bar_h)
+    # After the plugin's InputManager include, which opens its private parts.
+    h = replace_once(h, "#undef private\n", "#undef private\n#include <hyprland/src/layout/LayoutManager.hpp>\n", bar_h)
+
+    b = replace_once(b, '#include "globals.hpp"\n',
+                     '#include <hyprland/src/pointer/cursor/CursorShapeOverrideController.hpp>\n'
+                     '#include <hyprland/src/layout/supplementary/DragController.hpp>\n\n#include "globals.hpp"\n', bar_cpp)
+
+    # The functions go just before the first member definition.
+    first = b.index("\nCOmarchyFloatingHyprBar::COmarchyFloatingHyprBar(")
+    b = b[:first] + "\n" + EDGE_FUNCTIONS + b[first:]
+
+    # A closing window gives the cursor back.
+    destructor = re.compile(r"COmarchyFloatingHyprBar::~COmarchyFloatingHyprBar\(\) \{")
+    if len(destructor.findall(b)) != 1:
+        raise ValueError(f"fix: expected one destructor in {bar_cpp}")
+    b = destructor.sub(lambda m: m.group(0) + """
+  if (g_pEdgeCursorOwner == this) {
+    g_pEdgeCursorOwner = nullptr;
+    Pointer::Cursor::overrideController->unsetOverride(Pointer::Cursor::CURSOR_OVERRIDE_UNKNOWN);
+  }
+""", b)
+
+    b = replace_once(b, "void COmarchyFloatingHyprBar::onMouseMove(Vector2D coords) {\n",
+                     "void COmarchyFloatingHyprBar::onMouseMove(Vector2D coords) {\n  updateEdgeCursor();\n\n", bar_cpp)
+
+    press = re.compile(r"bool COmarchyFloatingHyprBar::startTopEdgeResize\(Event::SCallbackInfo &info, PHLWINDOW window, const Vector2D &coords\) \{\n.*?\n\}\n", re.S)
+    if len(press.findall(b)) != 1:
+        raise ValueError(f"fix: startTopEdgeResize is not what it expects in {bar_cpp}")
+    b = press.sub(lambda m: EDGE_PRESS, b)
+
+    bar_h.write_text(h)
+    bar_cpp.write_text(b)
+    return True
+
+
 def main() -> int:
     root = Path(sys.argv[1])
     path = root / "barDeco.cpp"
@@ -121,6 +322,7 @@ def main() -> int:
 
     try:
         changed = alt_icon(root) or changed
+        changed = edge_cursor(root) or changed
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1
