@@ -130,10 +130,69 @@ end
 -- border and rounding, inside the gaps and clear of the OS bar. Doing it again
 -- puts the window back where it was. Omarchy's own action instead puts the
 -- window in Hyprland's maximized state, a kind of fullscreen.
+--
+-- A filled window carries the dtp-filled tag, which the patched title bar
+-- plugin reads to show ❐ on the button instead of □. Moving or resizing it
+-- by hand ends the fill: the tag goes and the next double-click fills again.
+local FILLED_TAG = "dtp-filled"
 hl._dtp_windows_filled = hl._dtp_windows_filled or {}
 
 local function close_to(a, b)
   return math.abs(a - b) <= 2
+end
+
+-- Where a window goes to fill its screen, in layout units.
+local function fill_rect(window)
+  local monitor = window.monitor
+  local scale = (monitor.scale and monitor.scale ~= 0) and monitor.scale or 1
+  local width, height = monitor.width / scale, monitor.height / scale
+  if (monitor.transform or 0) % 2 == 1 then
+    width, height = height, width
+  end
+  local reserved = type(monitor.reserved) == "table" and monitor.reserved or {}
+  local gaps = hl.get_config("general.gaps_out")
+  if type(gaps) ~= "table" then
+    local gap = tonumber(gaps) or 0
+    gaps = { top = gap, right = gap, bottom = gap, left = gap }
+  end
+  local border = tonumber(hl.get_config("general.border_size")) or 0
+  -- The title bar hangs above the client, so the client starts below it.
+  local bar = o.titlebar_height or 30
+
+  local left = monitor.x + (reserved.left or 0) + (gaps.left or 0) + border
+  local top = monitor.y + (reserved.top or 0) + (gaps.top or 0) + border + bar
+  local right = monitor.x + width - (reserved.right or 0) - (gaps.right or 0) - border
+  local bottom = monitor.y + height - (reserved.bottom or 0) - (gaps.bottom or 0) - border
+  return {
+    x = math.floor(left + 0.5),
+    y = math.floor(top + 0.5),
+    w = math.floor(right - left + 0.5),
+    h = math.floor(bottom - top + 0.5),
+  }
+end
+
+local function at_fill(window)
+  if not window.monitor or not window.floating or (window.fullscreen or 0) ~= 0 then
+    return false
+  end
+  local fill = fill_rect(window)
+  local at, size = window.at, window.size
+  return close_to(at.x, fill.x) and close_to(at.y, fill.y) and close_to(size.x, fill.w) and close_to(size.y, fill.h)
+end
+
+local function tagged(window)
+  for _, tag in ipairs(window.tags or {}) do
+    if tag == FILLED_TAG or tag == FILLED_TAG .. "*" then
+      return true
+    end
+  end
+  return false
+end
+
+local function set_tag(window, on)
+  if tagged(window) ~= on then
+    hl.dispatch(hl.dsp.window.tag({ tag = (on and "+" or "-") .. FILLED_TAG, window = window }))
+  end
 end
 
 function hl._dtp_windows_fill(address)
@@ -155,49 +214,62 @@ function hl._dtp_windows_fill(address)
     return
   end
 
-  local monitor = window.monitor
-  local scale = (monitor.scale and monitor.scale ~= 0) and monitor.scale or 1
-  local width, height = monitor.width / scale, monitor.height / scale
-  if (monitor.transform or 0) % 2 == 1 then
-    width, height = height, width
-  end
-  local reserved = type(monitor.reserved) == "table" and monitor.reserved or {}
-  local gaps = hl.get_config("general.gaps_out")
-  if type(gaps) ~= "table" then
-    local gap = tonumber(gaps) or 0
-    gaps = { top = gap, right = gap, bottom = gap, left = gap }
-  end
-  local border = tonumber(hl.get_config("general.border_size")) or 0
-  -- The title bar hangs above the client, so the client starts below it.
-  local bar = o.titlebar_height or 30
-
-  local left = monitor.x + (reserved.left or 0) + (gaps.left or 0) + border
-  local top = monitor.y + (reserved.top or 0) + (gaps.top or 0) + border + bar
-  local right = monitor.x + width - (reserved.right or 0) - (gaps.right or 0) - border
-  local bottom = monitor.y + height - (reserved.bottom or 0) - (gaps.bottom or 0) - border
-  local fill = {
-    x = math.floor(left + 0.5),
-    y = math.floor(top + 0.5),
-    w = math.floor(right - left + 0.5),
-    h = math.floor(bottom - top + 0.5),
-  }
-
+  local fill = fill_rect(window)
   local at, size = window.at, window.size
-  local filled = close_to(at.x, fill.x) and close_to(at.y, fill.y) and close_to(size.x, fill.w) and close_to(size.y, fill.h)
-  local saved = hl._dtp_windows_filled[address]
   local target
-  if filled and saved then
-    target = saved
+  if at_fill(window) then
+    -- Back to where it was. After a Hyprland reload that is forgotten, so it
+    -- comes down to two thirds of the space, centered.
+    target = hl._dtp_windows_filled[address]
+    if not target then
+      local w, h = math.floor(fill.w * 2 / 3), math.floor(fill.h * 2 / 3)
+      target = { x = fill.x + math.floor((fill.w - w) / 2), y = fill.y + math.floor((fill.h - h) / 2), w = w, h = h }
+    end
     hl._dtp_windows_filled[address] = nil
-  elseif filled then
-    return
+    set_tag(window, false)
   else
     hl._dtp_windows_filled[address] = { x = at.x, y = at.y, w = size.x, h = size.y }
     target = fill
+    set_tag(window, true)
   end
 
   hl.dispatch(hl.dsp.window.resize({ x = target.w, y = target.h, relative = false, window = window }))
   hl.dispatch(hl.dsp.window.move({ x = target.x, y = target.y, relative = false, window = window }))
+end
+
+-- The size a filled window had before it filled, for floating-size.lua to keep
+-- as the app's size. false for a filled window whose size before is forgotten,
+-- so nothing is kept; nil for a window that is not filled.
+function hl._dtp_windows_unfilled_size(window)
+  if not at_fill(window) then
+    return nil
+  end
+  local saved = hl._dtp_windows_filled[window.address]
+  if saved then
+    return { x = saved.w, y = saved.h }
+  end
+  return tagged(window) and false or nil
+end
+
+-- A filled window moved or resized by hand, or closed, is no longer filled.
+-- There is no move or resize event, so this looks a few times a second.
+if not hl._dtp_windows_fill_watch then
+  hl._dtp_windows_fill_watch = true
+  hl.timer(function()
+    local open = {}
+    for _, window in ipairs(hl.get_windows()) do
+      open[window.address] = true
+      if (hl._dtp_windows_filled[window.address] or tagged(window)) and not at_fill(window) then
+        hl._dtp_windows_filled[window.address] = nil
+        set_tag(window, false)
+      end
+    end
+    for address in pairs(hl._dtp_windows_filled) do
+      if not open[address] then
+        hl._dtp_windows_filled[address] = nil
+      end
+    end
+  end, { timeout = 250, type = "repeat" })
 end
 
 local FILL_ACTION = [[hyprctl eval 'hl._dtp_windows_fill("%WINDOW%")']]
@@ -235,6 +307,8 @@ if not hl._dtp_windows_wrapped then
           button.bg_color = clear(button.bg_color)
           if type(button.action) == "string" and button.action:find('"maximized"', 1, true) then
             button.action = FILL_ACTION
+            button.alt_icon = "❐"
+            button.alt_tag = FILLED_TAG
           end
         end
         return add_button(button, ...)

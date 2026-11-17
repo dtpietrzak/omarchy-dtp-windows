@@ -63,12 +63,12 @@ git -c advice.detachedHead=false clone -q --depth 1 --branch "v$version" "$REPO"
 status=0
 python3 "$ROOT/fix.py" "$work/src" || status=$?
 if [[ $status -eq 3 ]]; then
-  # Omarchy's own build blurs. Make way for it.
+  # Omarchy's own build has every fix. Make way for it.
   if [[ -e $OUT ]]; then
     rm -rf "$OUT"
-    echo "Removed the patched title bar plugin: Omarchy's v$version blurs on its own"
+    echo "Removed the patched title bar plugin: Omarchy's v$version has every fix"
   else
-    echo "Omarchy's title bar plugin v$version blurs on its own; nothing to build"
+    echo "Omarchy's title bar plugin v$version has every fix; nothing to build"
   fi
   exit 0
 fi
@@ -88,4 +88,4 @@ printf '%s\n' "$version" >"$OUT/titlebars-version"
 printf '%s\n' "$commit" >"$OUT/hyprland-commit"
 printf '%s\n' "$fixer_sum" >"$OUT/fix-sha256"
 rm -f "$OUT/blur.patch"
-echo "Built the title bar plugin v$version with blur for Hyprland ${commit:0:7}"
+echo "Built the patched title bar plugin v$version for Hyprland ${commit:0:7}"
